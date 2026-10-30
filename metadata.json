@@ -1,0 +1,6 @@
+{
+  "name": "VektorStudio",
+  "description": "次世代ベクタークリエイティブスタジオ - アイビスペイントの描き心地、Scratch風ノード編集、CLIP STUDIOの漫画制作機能を融合したSVGネイティブWebアプリ",
+  "permissions": [],
+  "capabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
