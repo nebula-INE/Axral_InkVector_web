@@ -23,7 +23,9 @@ import {
   Ban,
   Wand2,
   ImageDown,
-  CircleDot
+  CircleDot,
+  Undo2,
+  Redo2
 } from 'lucide-react';
 
 interface ToolbarProps {
@@ -44,6 +46,10 @@ interface ToolbarProps {
   onWidthBrushModeChange?: (mode: WidthBrushMode) => void;
   onOpenEffectModal?: () => void;
   onOpenTraceModal?: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
+  onUndo?: () => void;
+  onRedo?: () => void;
 }
 
 export const Toolbar: React.FC<ToolbarProps> = ({
@@ -64,6 +70,10 @@ export const Toolbar: React.FC<ToolbarProps> = ({
   onWidthBrushModeChange,
   onOpenEffectModal,
   onOpenTraceModal,
+  canUndo = false,
+  canRedo = false,
+  onUndo,
+  onRedo,
 }) => {
   const [showShapeMenu, setShowShapeMenu] = useState(false);
 
@@ -89,20 +99,20 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
   const tools: { id: ToolType; label: string; shortcut: string; icon: React.ReactNode }[] = [
     { id: 'pen', label: 'ペン / ブラシ', shortcut: 'P', icon: <PenTool className="w-4 h-4" /> },
+    { id: 'width', label: `線幅修正ブラシ (${widthBrushMode === 'thicken' ? '太く' : widthBrushMode === 'thin' ? '細く' : widthBrushMode === 'taper' ? '抜き入り' : '均一'})`, shortcut: 'W', icon: <SlidersHorizontal className="w-4 h-4 text-violet-400" /> },
+    { id: 'reshape', label: '変形・ノード編集 (Scratch風)', shortcut: 'A', icon: <Spline className="w-4 h-4 text-sky-400" /> },
     { 
       id: 'shape', 
       label: `シェイプ (${shapeLabel()})`, 
       shortcut: 'U', 
       icon: shapeIcon()
     },
-    { id: 'reshape', label: '変形・ノード編集 (Scratch風)', shortcut: 'A', icon: <Spline className="w-4 h-4 text-sky-400" /> },
     { id: 'bucket', label: 'ベクターバケツ / 塗りつぶし', shortcut: 'B', icon: <PaintBucket className="w-4 h-4 text-emerald-400" /> },
     { id: 'select', label: '選択・変形', shortcut: 'V', icon: <MousePointer className="w-4 h-4" /> },
     { id: 'eraser', label: '通常消しゴム', shortcut: 'E', icon: <Eraser className="w-4 h-4" /> },
     { id: 'eyedropper', label: 'スポイト', shortcut: 'I / Alt', icon: <Pipette className="w-4 h-4" /> },
     { id: 'trim', label: '交差点消しゴム', shortcut: 'T', icon: <Scissors className="w-4 h-4 text-amber-400" /> },
     { id: 'scissors', label: 'パス切断 (ハサミ)', shortcut: 'C', icon: <Scissors className="w-4 h-4" /> },
-    { id: 'width', label: '線幅編集', shortcut: 'W', icon: <SlidersHorizontal className="w-4 h-4" /> },
     { id: 'mesh', label: 'カラーメッシュ', shortcut: 'M', icon: <Grid3X3 className="w-4 h-4" /> },
     { id: 'balloon', label: 'フキダシ作成 (ドラッグ配置)', shortcut: 'Alt+B', icon: <MessageSquare className="w-4 h-4" /> },
     { id: 'panel', label: 'コマ割り (ドラッグ配置)', shortcut: 'Alt+P', icon: <Maximize2 className="w-4 h-4" /> },
@@ -121,6 +131,39 @@ export const Toolbar: React.FC<ToolbarProps> = ({
 
   return (
     <aside className="w-16 bg-zinc-900 border-r border-zinc-800 flex flex-col items-center py-2 z-20 shrink-0 select-none overflow-y-auto scrollbar-none">
+      {/* Scratch-style Undo & Redo Top Controls (戻る・進む) */}
+      <div className="flex items-center justify-between gap-1 w-full px-2 pb-2 mb-1.5 border-b border-zinc-800">
+        <button
+          onClick={onUndo}
+          disabled={!canUndo}
+          title="元に戻す (Ctrl+Z)"
+          aria-label="元に戻す"
+          className={`flex-1 h-9 rounded-lg flex flex-col items-center justify-center transition-all ${
+            canUndo
+              ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 hover:text-white shadow-xs border border-zinc-700/80 active:scale-95 cursor-pointer'
+              : 'opacity-30 cursor-not-allowed bg-zinc-800/40 text-zinc-500 border border-transparent'
+          }`}
+        >
+          <Undo2 className="w-4 h-4" />
+          <span className="text-[9px] font-medium leading-none mt-0.5 scale-90">戻る</span>
+        </button>
+
+        <button
+          onClick={onRedo}
+          disabled={!canRedo}
+          title="やり直す (Ctrl+Y)"
+          aria-label="やり直す"
+          className={`flex-1 h-9 rounded-lg flex flex-col items-center justify-center transition-all ${
+            canRedo
+              ? 'bg-zinc-800 hover:bg-zinc-700 text-zinc-100 hover:text-white shadow-xs border border-zinc-700/80 active:scale-95 cursor-pointer'
+              : 'opacity-30 cursor-not-allowed bg-zinc-800/40 text-zinc-500 border border-transparent'
+          }`}
+        >
+          <Redo2 className="w-4 h-4" />
+          <span className="text-[9px] font-medium leading-none mt-0.5 scale-90">進む</span>
+        </button>
+      </div>
+
       {/* Tool Buttons */}
       <div className="flex flex-col gap-1 w-full px-2 items-center relative">
         {tools.map(t => {

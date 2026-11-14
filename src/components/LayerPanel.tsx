@@ -10,8 +10,12 @@ import {
   ArrowUp, 
   ArrowDown, 
   Copy,
-  Layers as LayersIcon
+  Layers as LayersIcon,
+  Pencil,
+  Bookmark,
+  Sparkles
 } from 'lucide-react';
+import { cleanStrayDots } from '../utils/geometry';
 
 interface LayerPanelProps {
   doc: Document;
@@ -25,6 +29,18 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
   onStatusChange,
 }) => {
   const activeLayer = doc.layers.find(l => l.id === doc.activeLayerId) || doc.layers[0];
+
+  const handleCleanStrayDots = () => {
+    if (!activeLayer) return;
+    const { cleanedPaths, removedCount } = cleanStrayDots(activeLayer.paths, 10);
+    if (removedCount === 0) {
+      onStatusChange('微小なゴミ線は見つかりませんでした（綺麗な線画です）');
+      return;
+    }
+    const newLayers = doc.layers.map(l => l.id === activeLayer.id ? { ...l, paths: cleanedPaths } : l);
+    onUpdateDoc({ ...doc, layers: newLayers });
+    onStatusChange(`ゴミ取り完了: ${removedCount}個の微小な点を一発消去しました！`);
+  };
 
   const handleAddLayer = () => {
     const newLayer: Layer = {
@@ -164,20 +180,65 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
           </div>
         </div>
 
-        {/* Clipping Mask Toggle */}
+        {/* Layer Special Modes: Draft Layer & Reference Layer */}
+        <div className="grid grid-cols-2 gap-1.5 pt-1 border-t border-zinc-800/60">
+          <button
+            onClick={() => {
+              const nextVal = !activeLayer.isDraft;
+              updateActiveLayer({ isDraft: nextVal });
+              onStatusChange(nextVal ? '下描きレイヤーに設定しました (水色鉛筆表示)' : '下描きレイヤーを解除しました');
+            }}
+            title="下描きレイヤーに設定（水色で淡く表示され、線画作業を邪魔しません）"
+            className={`flex items-center justify-center gap-1 py-1 px-1.5 rounded border text-[11px] font-medium transition-all ${
+              activeLayer.isDraft
+                ? 'bg-sky-950/60 border-sky-500 text-sky-300 shadow-xs'
+                : 'bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <Pencil className="w-3 h-3 text-sky-400" />
+            <span>{activeLayer.isDraft ? '✓ 下描き設定中' : '下描きに設定'}</span>
+          </button>
+
+          <button
+            onClick={() => {
+              const nextVal = !activeLayer.isReference;
+              updateActiveLayer({ isReference: nextVal });
+              onStatusChange(nextVal ? '線画参照レイヤーに設定しました (バケツの境界線として認識)' : '線画参照を解除しました');
+            }}
+            title="線画参照レイヤーに設定（別レイヤーでバケツ塗りつぶしする際、このレイヤーの線を境界線として認識）"
+            className={`flex items-center justify-center gap-1 py-1 px-1.5 rounded border text-[11px] font-medium transition-all ${
+              activeLayer.isReference
+                ? 'bg-emerald-950/60 border-emerald-500 text-emerald-300 shadow-xs'
+                : 'bg-zinc-800/80 border-zinc-700 text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            <Bookmark className="w-3 h-3 text-emerald-400" />
+            <span>{activeLayer.isReference ? '✓ 線画参照中' : '線画参照に設定'}</span>
+          </button>
+        </div>
+
+        {/* Clipping Mask & Stray Dust Cleaner */}
         <div className="flex items-center justify-between pt-1 border-t border-zinc-800/60">
-          <span className="text-zinc-400">クリッピング:</span>
           <button
             onClick={() => updateActiveLayer({ clipped: !activeLayer.clipped })}
             disabled={doc.layers.indexOf(activeLayer) === doc.layers.length - 1}
             title="下のレイヤーの描画範囲でクリッピング (影塗り・ハイライト)"
-            className={`px-2 py-0.5 rounded border text-xs font-medium transition-colors ${
+            className={`px-2 py-0.5 rounded border text-[11px] font-medium transition-colors ${
               activeLayer.clipped
                 ? 'bg-indigo-600/30 border-indigo-500 text-indigo-300'
                 : 'bg-zinc-800 border-zinc-700 text-zinc-400 hover:text-zinc-200'
             } disabled:opacity-30`}
           >
-            {activeLayer.clipped ? '✓ 下のレイヤーでクリッピング' : 'クリッピング無効'}
+            {activeLayer.clipped ? '✓ クリッピング' : 'クリッピング無効'}
+          </button>
+
+          <button
+            onClick={handleCleanStrayDots}
+            title="意図せず画面に触れてできた微小な点・ゴミ線を一発消去"
+            className="flex items-center gap-1 px-2 py-0.5 rounded border border-amber-500/40 bg-amber-950/30 hover:bg-amber-900/50 text-amber-300 text-[11px] font-medium transition-all cursor-pointer shadow-xs"
+          >
+            <Sparkles className="w-3 h-3 text-amber-400" />
+            <span>ゴミ取り</span>
           </button>
         </div>
       </div>
@@ -245,6 +306,17 @@ export const LayerPanel: React.FC<LayerPanelProps> = ({
                   }}
                   className="bg-transparent text-zinc-200 focus:outline-none focus:bg-zinc-800 rounded px-1 truncate flex-1"
                 />
+
+                {layer.isDraft && (
+                  <span className="text-[9px] bg-sky-950 text-sky-300 border border-sky-500/50 px-1 py-0.5 rounded font-mono shrink-0" title="下描きレイヤー (水色鉛筆)">
+                    下描き
+                  </span>
+                )}
+                {layer.isReference && (
+                  <span className="text-[9px] bg-emerald-950 text-emerald-300 border border-emerald-500/50 px-1 py-0.5 rounded font-mono shrink-0" title="線画参照レイヤー">
+                    参照
+                  </span>
+                )}
 
                 <span className="text-[10px] text-zinc-500 shrink-0 font-mono">
                   {layer.paths.length}p

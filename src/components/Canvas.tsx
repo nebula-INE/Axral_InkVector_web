@@ -8,11 +8,15 @@ import {
   trimPathAtIntersections, catmullRomToBezier, getSymmetricPoints,
   simplifyPolyline, isPointInVPath, splitVPathAtPoint, insertNodeInSegment, transformPath,
   createShapeNodes, toggleNodeSmoothness, deleteNodeFromPath, eraseVectorPathAtPoint,
-  modifyPathStrokeWidth
+  modifyPathStrokeWidth, findNearestPointOnVPath, closePathIfEndpointsMeet,
+  findEnclosedRegionWithGaps, recognizeQuickShape, QuickShapeResult, cleanStrayDots, simplifyVPath
 } from '../utils/geometry';
 import { renderMesh, createDefaultMesh } from '../utils/mesh';
 import { calculateStrokeWidth, BRUSH_PRESETS } from '../utils/brushes';
-import { Check, X, Type, Spline, CircleDot, Square, Trash2 } from 'lucide-react';
+import { 
+  Check, X, Type, Spline, CircleDot, Square, Trash2, SlidersHorizontal, PenTool,
+  Undo2, Redo2, PaintBucket, Eraser, Pipette, Sparkles, Wand2, Lightbulb, ChevronDown, ChevronUp
+} from 'lucide-react';
 
 interface CanvasProps {
   doc: Document;
@@ -31,6 +35,8 @@ interface CanvasProps {
   onSelectPaths: (ids: string[]) => void;
   onUndo: () => void;
   onRedo: () => void;
+  canUndo?: boolean;
+  canRedo?: boolean;
   statusMessage?: string;
   onStatusChange: (msg: string) => void;
   onStrokeColorChange?: (c: string) => void;
@@ -41,10 +47,106 @@ interface CanvasProps {
   eraserMode?: EraserMode;
   eraserRadius?: number;
   widthBrushMode?: WidthBrushMode;
+  onWidthBrushModeChange?: (mode: WidthBrushMode) => void;
+  onSelectTool?: (tool: ToolType) => void;
   activeTone?: ScreenTone;
 }
 
 type TransformHandle = 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w' | 'rotate' | 'body';
+
+export const TOOL_HINTS: Partial<Record<ToolType, { title: string; main: string; tip: string; shortcut?: string }>> = {
+  pen: {
+    title: 'ペン作画 (Gペン / 鉛筆 / 筆)',
+    shortcut: 'P',
+    main: '描いた線の終わりで約0.4秒静止すると、綺麗な直線・正円・四角形に自動吸着します (QuickShape)',
+    tip: 'キャンバス上で右クリックすると、手元に8方向クイックメニューをいつでも呼び出せます',
+  },
+  bucket: {
+    title: '隙間閉じスマートバケツ',
+    shortcut: 'G',
+    main: '線画に最大35pxの隙間があっても外に漏れず自動補完して塗れます（塗りは自動で線画の下層に配置）',
+    tip: 'レイヤーパネルで「線画参照」に設定すると、別レイヤーの線画を参照して綺麗に塗り分けられます',
+  },
+  eraser: {
+    title: 'ベクター消しゴム',
+    shortcut: 'E',
+    main: '交点まで一発消去 / なぞった部分消去 / 触れた線全体消去を上部バーで切り替え可能',
+    tip: '交差する不要なはみ出し線も「交点まで消去」モードで一瞬で綺麗に消去できます',
+  },
+  width: {
+    title: '線幅修正ブラシ',
+    shortcut: 'W',
+    main: '描いた後の線をなぞるだけで、部分的に太く・細く・入り抜き(強弱)を自由自在に修正できます',
+    tip: '作画中に「W」キーを押すだけで、画面移動なしにその場で線幅修正ブラシに切り替わります',
+  },
+  reshape: {
+    title: 'アンカーポイント変形',
+    shortcut: 'A',
+    main: '青いアンカーポイントをドラッグして曲線の形状を直感的に修正。角丸(曲線)と尖り(直線)もワンタップ切替',
+    tip: 'サブバーの「曲線単純化」を押すと、余分なアンカーポイントを自動整理して美しいなめらかな線になります',
+  },
+  eyedropper: {
+    title: 'カラーピッカー (スポイト)',
+    shortcut: 'I',
+    main: 'キャンバス上の任意の色をクリックして取得します。画面上の拡大ルーペで1px単位で色を拾えます',
+    tip: 'ペンやバケツ使用中でも、Altキーを押しながらクリックすると即座にスポイトできます',
+  },
+  select: {
+    title: '選択・自由変形',
+    shortcut: 'V',
+    main: '図形をクリックして選択。周囲の青いハンドルで拡大・縮小・回転・移動ができます',
+    tip: 'Shiftキーを押しながら角ハンドルをドラッグすると、縦横比を維持したまま拡大縮小できます',
+  },
+  shape: {
+    title: '図形ツール',
+    shortcut: 'U',
+    main: 'ドラッグして長方形・楕円・星形・矢印・多角形を作成。Shiftキーで正方形・正円に固定できます',
+    tip: '作成後に「アンカーポイント変形(A)」に切り替えると、頂点を自由に動かして変形できます',
+  },
+  panel: {
+    title: 'マンガコマ割りツール',
+    main: 'キャンバス上をドラッグしてマンガのコマ枠を一発作成。枠線の太さや角丸も自由に調整可能',
+    tip: '「コマ割り分割」ツールでコマ枠を縦や斜めにスパッと分割できます',
+  },
+  balloon: {
+    title: 'セリフ・フキダシツール',
+    main: 'ドラッグしてフキダシを作成。ダブルクリックで縦書き/横書きのセリフ文字を直接入力できます',
+    tip: 'しっぽの青い丸ハンドルをドラッグすると、喋っているキャラクターの口元へ自然に伸ばせます',
+  },
+  focus_line: {
+    title: '集中線エフェクト',
+    main: 'アクションシーンや感情表現に使える集中線エフェクトをワンクリックで自動生成',
+    tip: '線の本数や密度、中心の抜き半径をリアルタイムにスライダーで調整できます',
+  },
+  speed_line: {
+    title: '流線 (スピード線)',
+    main: '疾走感や動きの方向を表現するスピード線をワンクリックで描画',
+    tip: '線の本数や角度、長さをスライダーでリアルタイムに調整できます',
+  },
+  mesh: {
+    title: 'グラデーションメッシュ',
+    main: '図形内部の格子ポイントを動かして、滑らかで立体的なカラーグラデーションを作成できます',
+    tip: '格子ピンをクリックして色を変えると、プロ品質の複雑な陰影やハイライトを表現できます',
+  },
+  hand: {
+    title: '手のひらツール',
+    shortcut: 'H',
+    main: 'キャンバスを自由につかんでスクロール移動します',
+    tip: 'どのツール使用中でも、スペースキーまたはマウスホイール中央ドラッグで画面を移動できます',
+  },
+  scissors: {
+    title: 'パス切断 (ハサミ) ツール',
+    shortcut: 'C',
+    main: 'ベクター線の切断したい箇所をクリックすると、パスを2つに分割できます',
+    tip: '切断した端点はアンカーポイント変形ツールで個別に動かせます',
+  },
+  trim: {
+    title: '交点トリミング',
+    shortcut: 'T',
+    main: '交差している線の不要なはみ出し部分をクリックして一発消去します',
+    tip: 'ベクター消しゴムの「交点まで消去」モードでも同じ操作が可能です',
+  },
+};
 
 export const Canvas: React.FC<CanvasProps> = ({
   doc,
@@ -63,6 +165,8 @@ export const Canvas: React.FC<CanvasProps> = ({
   onSelectPaths,
   onUndo,
   onRedo,
+  canUndo = false,
+  canRedo = false,
   statusMessage,
   onStatusChange,
   onStrokeColorChange,
@@ -73,6 +177,8 @@ export const Canvas: React.FC<CanvasProps> = ({
   eraserMode = 'intersection',
   eraserRadius = 24,
   widthBrushMode = 'thicken',
+  onWidthBrushModeChange,
+  onSelectTool,
   activeTone,
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -88,6 +194,16 @@ export const Canvas: React.FC<CanvasProps> = ({
   const [hoverDocPt, setHoverDocPt] = useState<Point | null>(null);
   const [hoverScreenPt, setHoverScreenPt] = useState<Point | null>(null);
   const [eyedropperColor, setEyedropperColor] = useState<string | null>(null);
+
+  // QuickShape Procreate-style shape snap
+  const [quickShapePreview, setQuickShapePreview] = useState<QuickShapeResult | null>(null);
+  const quickShapeTimerRef = useRef<number | null>(null);
+
+  // Canvas Stylus / Right-click Radial Quick Menu
+  const [radialMenuPos, setRadialMenuPos] = useState<Point | null>(null);
+
+  // Beginner Action Hint Banner state
+  const [isHintCollapsed, setIsHintCollapsed] = useState(false);
 
   // Current drawing stroke
   const isDrawingRef = useRef(false);
@@ -335,7 +451,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         ctx.globalAlpha = baseLayer.opacity;
         ctx.globalCompositeOperation = baseLayer.blendMode || 'source-over';
         for (const path of baseLayer.paths) {
-          renderPath(ctx, path);
+          renderPath(ctx, path, !!baseLayer.isDraft);
         }
         ctx.restore();
         i++;
@@ -348,7 +464,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         offCtx.globalAlpha = baseLayer.opacity;
         offCtx.globalCompositeOperation = 'source-over';
         for (const path of baseLayer.paths) {
-          renderPath(offCtx, path);
+          renderPath(offCtx, path, !!baseLayer.isDraft);
         }
         offCtx.restore();
 
@@ -360,7 +476,7 @@ export const Canvas: React.FC<CanvasProps> = ({
           offCtx.globalAlpha = clipLayer.opacity;
           offCtx.globalCompositeOperation = 'source-atop';
           for (const path of clipLayer.paths) {
-            renderPath(offCtx, path);
+            renderPath(offCtx, path, !!clipLayer.isDraft);
           }
           offCtx.restore();
         }
@@ -380,12 +496,27 @@ export const Canvas: React.FC<CanvasProps> = ({
     // Live Inking Stroke
     if (isDrawingRef.current && strokePointsRef.current.length > 1) {
       ctx.save();
+      const pts = strokePointsRef.current;
+
+      // Scratch-style live fill preview for open stroke
+      if (fillColor && fillColor !== 'none' && fillColor !== 'transparent') {
+        ctx.fillStyle = fillColor;
+        ctx.beginPath();
+        ctx.moveTo(pts[0].pt.x, pts[0].pt.y);
+        for (let k = 1; k < pts.length; k++) {
+          const xc = (pts[k - 1].pt.x + pts[k].pt.x) / 2;
+          const yc = (pts[k - 1].pt.y + pts[k].pt.y) / 2;
+          ctx.quadraticCurveTo(pts[k - 1].pt.x, pts[k - 1].pt.y, xc, yc);
+        }
+        ctx.closePath();
+        ctx.fill();
+      }
+
       ctx.strokeStyle = strokeColor;
       ctx.lineWidth = brushSize;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.beginPath();
-      const pts = strokePointsRef.current;
       ctx.moveTo(pts[0].pt.x, pts[0].pt.y);
       for (let k = 1; k < pts.length; k++) {
         const xc = (pts[k - 1].pt.x + pts[k].pt.x) / 2;
@@ -407,6 +538,19 @@ export const Canvas: React.FC<CanvasProps> = ({
         }
         for (const symPts of symPointsList) {
           if (symPts.length > 1) {
+            if (fillColor && fillColor !== 'none' && fillColor !== 'transparent') {
+              ctx.fillStyle = fillColor;
+              ctx.beginPath();
+              ctx.moveTo(symPts[0].x, symPts[0].y);
+              for (let k = 1; k < symPts.length; k++) {
+                const xc = (symPts[k - 1].x + symPts[k].x) / 2;
+                const yc = (symPts[k - 1].y + symPts[k].y) / 2;
+                ctx.quadraticCurveTo(symPts[k - 1].x, symPts[k - 1].y, xc, yc);
+              }
+              ctx.closePath();
+              ctx.fill();
+            }
+
             ctx.beginPath();
             ctx.moveTo(symPts[0].x, symPts[0].y);
             for (let k = 1; k < symPts.length; k++) {
@@ -417,6 +561,33 @@ export const Canvas: React.FC<CanvasProps> = ({
             ctx.stroke();
           }
         }
+      }
+      ctx.restore();
+    }
+
+    // Live QuickShape Snapping Preview (Procreate style)
+    if (quickShapePreview) {
+      ctx.save();
+      ctx.strokeStyle = '#06b6d4';
+      ctx.lineWidth = Math.max(brushSize, 2);
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+      ctx.beginPath();
+      buildPath2D(ctx, {
+        nodes: quickShapePreview.nodes,
+        closed: quickShapePreview.closed,
+      });
+      ctx.stroke();
+
+      // Render anchor control points
+      ctx.fillStyle = '#ffffff';
+      ctx.strokeStyle = '#0891b2';
+      ctx.lineWidth = 1.5;
+      for (const node of quickShapePreview.nodes) {
+        ctx.beginPath();
+        ctx.arc(node.pos.x, node.pos.y, 4 / zoom, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
       }
       ctx.restore();
     }
@@ -458,7 +629,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     renderToolOverlays(ctx);
 
     ctx.restore();
-  }, [doc, pan, zoom, rotation, flipH, strokeColor, fillColor, brushSize, tool, shapeType, selectedPathIds, rubberBand, dragCreation, draggedBalloonTail, hoverDocPt, hoverScreenPt, eyedropperColor]);
+  }, [doc, pan, zoom, rotation, flipH, strokeColor, fillColor, brushSize, tool, shapeType, selectedPathIds, rubberBand, dragCreation, draggedBalloonTail, hoverDocPt, hoverScreenPt, eyedropperColor, quickShapePreview]);
 
   useEffect(() => {
     let animId: number;
@@ -470,11 +641,11 @@ export const Canvas: React.FC<CanvasProps> = ({
     return () => cancelAnimationFrame(animId);
   }, [render]);
 
-  const renderPath = (ctx: CanvasRenderingContext2D, path: VPath) => {
+  const renderPath = (ctx: CanvasRenderingContext2D, path: VPath, isDraft = false) => {
     if (path.nodes.length === 0) return;
 
     ctx.save();
-    ctx.globalAlpha = path.opacity;
+    ctx.globalAlpha = isDraft ? Math.min(path.opacity, 0.65) : path.opacity;
 
     if (path.mesh && path.mesh.enabled) {
       const bbox = getPathBoundingBox(path);
@@ -487,18 +658,18 @@ export const Canvas: React.FC<CanvasProps> = ({
         ctx.restore();
       }
     } else if (path.fillColor && path.fillColor !== 'none' && path.fillColor !== 'transparent') {
-      ctx.fillStyle = path.fillColor;
+      ctx.fillStyle = isDraft ? 'rgba(96, 165, 250, 0.22)' : path.fillColor;
       ctx.beginPath();
       buildPath2D(ctx, path);
       ctx.fill();
     }
 
-    if (path.tone && path.tone.type !== 'none') {
+    if (path.tone && path.tone.type !== 'none' && !isDraft) {
       renderTonePattern(ctx, path);
     }
 
     if (path.strokeColor && path.strokeColor !== 'none' && path.strokeWidth > 0) {
-      ctx.strokeStyle = path.strokeColor;
+      ctx.strokeStyle = isDraft ? '#60a5fa' : path.strokeColor;
       ctx.lineWidth = path.strokeWidth;
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
@@ -514,7 +685,7 @@ export const Canvas: React.FC<CanvasProps> = ({
     ctx.restore();
   };
 
-  const buildPath2D = (ctx: CanvasRenderingContext2D, path: VPath) => {
+  const buildPath2D = (ctx: CanvasRenderingContext2D, path: { nodes: VNode[]; closed: boolean }) => {
     const nodes = path.nodes;
     if (nodes.length === 0) return;
     ctx.moveTo(nodes[0].pos.x, nodes[0].pos.y);
@@ -841,6 +1012,114 @@ export const Canvas: React.FC<CanvasProps> = ({
           ctx.lineWidth = 2;
           ctx.fill();
           ctx.stroke();
+        }
+      }
+
+      // Scratch-style Ghost Insertion Node on Line Hover (when not dragging a node)
+      if (!draggedNode && hoverDocPt) {
+        let bestHit: { pt: Point; pathId: string } | null = null;
+        let bestDist = Infinity;
+        const allPathsToProbe = [
+          ...activeLayer.paths.filter(p => selectedPathIds.includes(p.id)),
+          ...activeLayer.paths.filter(p => !selectedPathIds.includes(p.id)),
+        ];
+
+        for (const p of allPathsToProbe) {
+          const hit = findNearestPointOnVPath(p, hoverDocPt, 22);
+          if (hit && hit.distance < bestDist) {
+            bestDist = hit.distance;
+            bestHit = { pt: hit.pt, pathId: p.id };
+          }
+        }
+
+        if (bestHit) {
+          const scr = toScreen(bestHit.pt.x, bestHit.pt.y);
+          ctx.save();
+          // Subtle pulsating halo
+          ctx.beginPath();
+          ctx.arc(scr.x, scr.y, 11, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(56, 189, 248, 0.22)';
+          ctx.fill();
+
+          // Ghost node circle
+          ctx.beginPath();
+          ctx.arc(scr.x, scr.y, 6, 0, Math.PI * 2);
+          ctx.fillStyle = '#38bdf8';
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 2;
+          ctx.fill();
+          ctx.stroke();
+
+          // '+' icon inside ghost node
+          ctx.strokeStyle = '#0f172a';
+          ctx.lineWidth = 1.8;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(scr.x - 3, scr.y);
+          ctx.lineTo(scr.x + 3, scr.y);
+          ctx.moveTo(scr.x, scr.y - 3);
+          ctx.lineTo(scr.x, scr.y + 3);
+          ctx.stroke();
+
+          // Floating hint badge
+          ctx.font = '10px sans-serif';
+          ctx.fillStyle = '#0f172a';
+          const hint = 'クリックして点を追加＆変形';
+          const hintW = ctx.measureText(hint).width + 12;
+          const hintX = scr.x + 12;
+          const hintY = scr.y - 10;
+          ctx.fillStyle = 'rgba(15, 23, 42, 0.85)';
+          ctx.beginPath();
+          ctx.roundRect(hintX, hintY - 12, hintW, 18, 4);
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(56, 189, 248, 0.5)';
+          ctx.lineWidth = 1;
+          ctx.stroke();
+          ctx.fillStyle = '#e0f2fe';
+          ctx.fillText(hint, hintX + 6, hintY + 1);
+
+          ctx.restore();
+        }
+      }
+
+      // Endpoint magnetic snapping visual indicator
+      if (draggedNode && draggedNode.type === 'pos') {
+        const path = activeLayer.paths.find(p => p.id === draggedNode.pathId);
+        if (path && !path.closed && path.nodes.length >= 3) {
+          const isEndpoint = draggedNode.nodeIndex === 0 || draggedNode.nodeIndex === path.nodes.length - 1;
+          if (isEndpoint) {
+            const otherIdx = draggedNode.nodeIndex === 0 ? path.nodes.length - 1 : 0;
+            const otherNode = path.nodes[otherIdx];
+            const scrOther = toScreen(otherNode.pos.x, otherNode.pos.y);
+            const scrDragged = toScreen(path.nodes[draggedNode.nodeIndex].pos.x, path.nodes[draggedNode.nodeIndex].pos.y);
+            const d = dist(scrOther, scrDragged);
+
+            if (d < 35) {
+              ctx.save();
+              ctx.strokeStyle = '#10b981';
+              ctx.lineWidth = 2;
+              ctx.setLineDash([4, 4]);
+              ctx.beginPath();
+              ctx.moveTo(scrDragged.x, scrDragged.y);
+              ctx.lineTo(scrOther.x, scrOther.y);
+              ctx.stroke();
+              ctx.setLineDash([]);
+
+              ctx.beginPath();
+              ctx.arc(scrOther.x, scrOther.y, 14, 0, Math.PI * 2);
+              ctx.fillStyle = 'rgba(16, 185, 129, 0.25)';
+              ctx.fill();
+              ctx.strokeStyle = '#10b981';
+              ctx.lineWidth = 2.5;
+              ctx.stroke();
+
+              // Snap text
+              ctx.font = 'bold 11px sans-serif';
+              ctx.fillStyle = '#10b981';
+              ctx.fillText('端点スナップ (結合して閉じる)', scrOther.x + 18, scrOther.y + 4);
+              ctx.restore();
+            }
+          }
         }
       }
     }
@@ -1239,6 +1518,11 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     // --- TOOL: PEN (Stylus Pressure Dynamics) ---
     if (tool === 'pen') {
+      if (quickShapeTimerRef.current) {
+        window.clearTimeout(quickShapeTimerRef.current);
+        quickShapeTimerRef.current = null;
+      }
+      setQuickShapePreview(null);
       isDrawingRef.current = true;
       if (onAddColorHistory && strokeColor && strokeColor !== 'none') {
         onAddColorHistory(strokeColor);
@@ -1294,16 +1578,17 @@ export const Canvas: React.FC<CanvasProps> = ({
 
     // --- TOOL: RESHAPE (Scratch-style node selection & deformation) ---
     if (tool === 'reshape') {
-      const inspectPaths = selectedPathIds.length > 0 
-        ? activeLayer.paths.filter(p => selectedPathIds.includes(p.id))
-        : activeLayer.paths;
+      const allPathsOrdered = [
+        ...activeLayer.paths.filter(p => selectedPathIds.includes(p.id)),
+        ...activeLayer.paths.filter(p => !selectedPathIds.includes(p.id)),
+      ];
 
       // 1. Check existing anchor points and handles
-      for (const p of inspectPaths) {
+      for (const p of allPathsOrdered) {
         for (let idx = 0; idx < p.nodes.length; idx++) {
           const n = p.nodes[idx];
           const scrPos = toScreen(n.pos.x, n.pos.y);
-          if (dist(scrPos, screenPt) < 12) {
+          if (dist(scrPos, screenPt) < 13) {
             setSelectedNode({ pathId: p.id, nodeIndex: idx });
             setDraggedNode({
               pathId: p.id,
@@ -1318,7 +1603,7 @@ export const Canvas: React.FC<CanvasProps> = ({
             onStatusChange(`点 #${idx + 1} を選択中 (ドラッグで移動、ダブルクリックで角丸/尖り切替)`);
             return;
           }
-          if (n.cpIn && dist(toScreen(n.cpIn.x, n.cpIn.y), screenPt) < 9) {
+          if (n.cpIn && dist(toScreen(n.cpIn.x, n.cpIn.y), screenPt) < 10) {
             setSelectedNode({ pathId: p.id, nodeIndex: idx });
             setDraggedNode({
               pathId: p.id,
@@ -1332,7 +1617,7 @@ export const Canvas: React.FC<CanvasProps> = ({
             onSelectPaths([p.id]);
             return;
           }
-          if (n.cpOut && dist(toScreen(n.cpOut.x, n.cpOut.y), screenPt) < 9) {
+          if (n.cpOut && dist(toScreen(n.cpOut.x, n.cpOut.y), screenPt) < 10) {
             setSelectedNode({ pathId: p.id, nodeIndex: idx });
             setDraggedNode({
               pathId: p.id,
@@ -1349,50 +1634,41 @@ export const Canvas: React.FC<CanvasProps> = ({
         }
       }
 
-      // 2. Click on outline to insert anchor point and immediately start dragging
-      for (const p of inspectPaths) {
-        const updated = insertNodeInSegment(p, docPt, 16);
-        if (updated) {
-          // Find newly inserted node closest to docPt
-          let closestIdx = 0;
-          let closestDist = Infinity;
-          for (let i = 0; i < updated.nodes.length; i++) {
-            const d = dist(updated.nodes[i].pos, docPt);
-            if (d < closestDist) {
-              closestDist = d;
-              closestIdx = i;
-            }
-          }
-          const newNode = updated.nodes[closestIdx];
+      // 2. Click on outline to insert anchor point and immediately start dragging (Scratch style)
+      for (const p of allPathsOrdered) {
+        const result = insertNodeInSegment(p, docPt, 22);
+        if (result) {
+          const { updatedPath, insertedIndex } = result;
+          const newNode = updatedPath.nodes[insertedIndex];
 
-          const newPaths = activeLayer.paths.map(x => x.id === p.id ? updated : x);
+          const newPaths = activeLayer.paths.map(x => x.id === p.id ? updatedPath : x);
           onUpdateDoc({
             ...doc,
             layers: doc.layers.map(l => l.id === activeLayer.id ? { ...l, paths: newPaths } : l),
           });
           onSelectPaths([p.id]);
-          setSelectedNode({ pathId: p.id, nodeIndex: closestIdx });
+          setSelectedNode({ pathId: p.id, nodeIndex: insertedIndex });
           setDraggedNode({
             pathId: p.id,
-            nodeIndex: closestIdx,
+            nodeIndex: insertedIndex,
             type: 'pos',
             origPos: { ...newNode.pos },
             origCpIn: newNode.cpIn ? { ...newNode.cpIn } : undefined,
             origCpOut: newNode.cpOut ? { ...newNode.cpOut } : undefined,
             smooth: newNode.smooth,
           });
-          onStatusChange('新しいアンカーポイントを追加しました (そのままドラッグで変形)');
+          onStatusChange('線上に新しい点を追加しました (そのままドラッグして曲線をベンド)');
           return;
         }
       }
 
-      // 3. Clicked on shape body -> select that shape
+      // 3. Clicked on shape body (closed shape or open shape with virtual fill) -> select that shape
       for (let k = activeLayer.paths.length - 1; k >= 0; k--) {
         const p = activeLayer.paths[k];
-        if (isPointInVPath(docPt, p)) {
+        if (isPointInVPath(docPt, p, true)) {
           onSelectPaths([p.id]);
           setSelectedNode(null);
-          onStatusChange('図形を選択しました (輪郭をクリックして点を追加)');
+          onStatusChange('図形を選択しました (線の上をクリックして点を追加)');
           return;
         }
       }
@@ -1459,39 +1735,76 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
-    // --- TOOL: BUCKET (Vector Fill) ---
+    // --- TOOL: BUCKET (Scratch-style Vector Fill: Closed shapes or Open Strokes, with Gap-Closing) ---
     if (tool === 'bucket') {
-      // 1. Check if clicked inside a closed shape
+      // 1. Check if clicked inside a closed or open shape's interior (virtual chord)
       for (let k = activeLayer.paths.length - 1; k >= 0; k--) {
         const p = activeLayer.paths[k];
-        if (isPointInVPath(docPt, p)) {
-          const newPaths = activeLayer.paths.map(x => x.id === p.id ? { ...x, fillColor, closed: true } : x);
+        if (isPointInVPath(docPt, p, true)) {
+          const newPaths = activeLayer.paths.map(x => x.id === p.id ? { ...x, fillColor } : x);
           onUpdateDoc({
             ...doc,
             layers: doc.layers.map(l => l.id === activeLayer.id ? { ...l, paths: newPaths } : l),
           });
           onSelectPaths([p.id]);
           if (onAddColorHistory && fillColor !== 'none') onAddColorHistory(fillColor);
-          onStatusChange(`塗り色を適用: ${fillColor === 'none' ? '透明 (塗りなし)' : fillColor}`);
+          onStatusChange(`内側の塗り色を適用: ${fillColor === 'none' ? '透明 (塗りなし)' : fillColor}`);
           return;
         }
       }
 
-      // 2. Check if clicked on/near the stroke of an unclosed or closed path to close and fill
+      // 2. Check if clicked on/near the stroke of an open or closed path
       for (let k = activeLayer.paths.length - 1; k >= 0; k--) {
         const p = activeLayer.paths[k];
         const samples = flattenVPath(p, 16);
-        if (samples.some(s => dist(s.pt, docPt) < 20)) {
-          const newPaths = activeLayer.paths.map(x => x.id === p.id ? { ...x, fillColor, closed: true } : x);
+        if (samples.some(s => dist(s.pt, docPt) < 22)) {
+          const newPaths = activeLayer.paths.map(x => x.id === p.id ? { ...x, fillColor } : x);
           onUpdateDoc({
             ...doc,
             layers: doc.layers.map(l => l.id === activeLayer.id ? { ...l, paths: newPaths } : l),
           });
           onSelectPaths([p.id]);
           if (onAddColorHistory && fillColor !== 'none') onAddColorHistory(fillColor);
-          onStatusChange(`図形を閉じて塗り色を適用: ${fillColor === 'none' ? '透明 (塗りなし)' : fillColor}`);
+          onStatusChange(`線の塗り色を適用: ${fillColor === 'none' ? '透明 (塗りなし)' : fillColor}`);
           return;
         }
+      }
+
+      // 3. Gap-Closing Smart Vector Bucket Fill (隙間閉じスマートベクターバケツ)
+      // Reference layer support: if any layer is marked isReference, use its boundary lines
+      const refLayer = doc.layers.find(l => l.isReference && l.visible);
+      const boundaryPaths = refLayer ? refLayer.paths : activeLayer.paths;
+
+      const region = findEnclosedRegionWithGaps(docPt, boundaryPaths, 35);
+      if (region && region.length >= 3) {
+        const fillNodes: VNode[] = region.map(pt => ({
+          pos: { x: pt.x, y: pt.y },
+          smooth: true,
+        }));
+        const targetColor = fillColor && fillColor !== 'none' && fillColor !== 'transparent' ? fillColor : '#3b82f6';
+        const newFillPath: VPath = {
+          id: 'fill_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6),
+          nodes: fillNodes,
+          closed: true,
+          strokeColor: 'none',
+          strokeWidth: 0,
+          fillColor: targetColor,
+          opacity: 1,
+          brushType: 'pen',
+          createdAt: Date.now(),
+        };
+
+        // Prepend to active layer paths so painted fill sits underneath lineart
+        onUpdateDoc({
+          ...doc,
+          layers: doc.layers.map(l => l.id === activeLayer.id ? { ...l, paths: [newFillPath, ...l.paths] } : l),
+        });
+        if (onAddColorHistory && targetColor !== 'none') onAddColorHistory(targetColor);
+        onStatusChange(refLayer 
+          ? `線画参照スマートバケツ: 参照レイヤー「${refLayer.name}」を参照して塗りました (隙間閉じ 35px)`
+          : `隙間閉じスマートバケツ: 線の隙間を閉じて領域を自動塗りつぶしました (隙間許容 35px)`
+        );
+        return;
       }
 
       onStatusChange('図形の内側または線の上をクリックして塗りつぶしてください');
@@ -1726,7 +2039,7 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
-    // Freehand Inking with Stabilizer
+    // Freehand Inking with Stabilizer + QuickShape Hold Detection
     if (isDrawingRef.current && tool === 'pen') {
       const pressure = e.pressure && e.pressure > 0 ? e.pressure : 0.5;
       const pts = strokePointsRef.current;
@@ -1739,6 +2052,22 @@ export const Canvas: React.FC<CanvasProps> = ({
       };
 
       pts.push({ pt: smoothedPt, pressure, time: Date.now() });
+
+      // QuickShape detection timer (420ms stationary hold)
+      if (quickShapeTimerRef.current) {
+        window.clearTimeout(quickShapeTimerRef.current);
+      }
+      quickShapeTimerRef.current = window.setTimeout(() => {
+        if (isDrawingRef.current && strokePointsRef.current.length > 6) {
+          const rawPts = strokePointsRef.current.map(p => p.pt);
+          const detected = recognizeQuickShape(rawPts);
+          if (detected) {
+            setQuickShapePreview(detected);
+            onStatusChange(`✦ QuickShape: ${detected.label} を認識！(ペンを離して確定)`);
+          }
+        }
+      }, 420);
+
       return;
     }
 
@@ -1751,11 +2080,27 @@ export const Canvas: React.FC<CanvasProps> = ({
         if (idx !== draggedNode.nodeIndex) return n;
 
         if (draggedNode.type === 'pos') {
-          const dx = docPt.x - n.pos.x;
-          const dy = docPt.y - n.pos.y;
+          let targetX = docPt.x;
+          let targetY = docPt.y;
+
+          // Magnetic snap if dragging endpoint close to opposite endpoint of open path
+          if (!path.closed && path.nodes.length >= 3) {
+            const isEndpoint = draggedNode.nodeIndex === 0 || draggedNode.nodeIndex === path.nodes.length - 1;
+            if (isEndpoint) {
+              const otherIdx = draggedNode.nodeIndex === 0 ? path.nodes.length - 1 : 0;
+              const otherPos = path.nodes[otherIdx].pos;
+              if (dist(docPt, otherPos) < 22) {
+                targetX = otherPos.x;
+                targetY = otherPos.y;
+              }
+            }
+          }
+
+          const dx = targetX - n.pos.x;
+          const dy = targetY - n.pos.y;
           return {
             ...n,
-            pos: { x: docPt.x, y: docPt.y },
+            pos: { x: targetX, y: targetY },
             cpIn: n.cpIn ? { x: n.cpIn.x + dx, y: n.cpIn.y + dy } : undefined,
             cpOut: n.cpOut ? { x: n.cpOut.x + dx, y: n.cpOut.y + dy } : undefined,
           };
@@ -1972,7 +2317,7 @@ export const Canvas: React.FC<CanvasProps> = ({
             closed: shapeResult.closed,
             strokeColor: strokeColor,
             strokeWidth: strokeColor === 'none' ? 0 : brushSize,
-            fillColor: shapeResult.closed ? fillColor : 'none',
+            fillColor: fillColor && fillColor !== 'transparent' ? fillColor : 'none',
             opacity: 1.0,
             brushType: 'pen',
             createdAt: Date.now(),
@@ -1999,11 +2344,45 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
+    // Clear quick shape timer
+    if (quickShapeTimerRef.current) {
+      window.clearTimeout(quickShapeTimerRef.current);
+      quickShapeTimerRef.current = null;
+    }
+
     // Finish Freehand Pen Stroke
     if (isDrawingRef.current && tool === 'pen') {
       isDrawingRef.current = false;
       const rawPoints = strokePointsRef.current;
       strokePointsRef.current = [];
+
+      if (!activeLayer) return;
+
+      // If QuickShape was snapped and recognized
+      if (quickShapePreview) {
+        const shape = quickShapePreview;
+        setQuickShapePreview(null);
+
+        const newPath: VPath = {
+          id: crypto.randomUUID(),
+          nodes: shape.nodes,
+          closed: shape.closed,
+          strokeColor,
+          strokeWidth: brushSize,
+          fillColor: fillColor && fillColor !== 'transparent' ? fillColor : 'none',
+          opacity: 1,
+          brushType,
+          pressures: shape.nodes.map(() => 1.0),
+          createdAt: Date.now(),
+        };
+
+        onUpdateDoc({
+          ...doc,
+          layers: doc.layers.map(l => l.id === activeLayer.id ? { ...l, paths: [...l.paths, newPath] } : l),
+        });
+        onStatusChange(`✦ QuickShape: ${shape.label} を確定しました`);
+        return;
+      }
 
       if (rawPoints.length < 2 || !activeLayer) return;
 
@@ -2017,7 +2396,7 @@ export const Canvas: React.FC<CanvasProps> = ({
         closed: false,
         strokeColor,
         strokeWidth: effectiveWidth,
-        fillColor: 'none',
+        fillColor: fillColor && fillColor !== 'transparent' ? fillColor : 'none',
         opacity: BRUSH_PRESETS[brushType].opacity,
         brushType,
         pressures: simplified.map(() => 1.0),
@@ -2075,6 +2454,27 @@ export const Canvas: React.FC<CanvasProps> = ({
       }
       setDraggedMeshPin(null);
       return;
+    }
+
+    // Finish Reshape Node Dragging (check endpoint snapping to close loop)
+    if (draggedNode && tool === 'reshape' && activeLayer) {
+      const path = activeLayer.paths.find(p => p.id === draggedNode.pathId);
+      if (path && !path.closed && path.nodes.length >= 3) {
+        if (draggedNode.nodeIndex === 0 || draggedNode.nodeIndex === path.nodes.length - 1) {
+          const otherIdx = draggedNode.nodeIndex === 0 ? path.nodes.length - 1 : 0;
+          if (dist(path.nodes[draggedNode.nodeIndex].pos, path.nodes[otherIdx].pos) < 25) {
+            const closedPath = closePathIfEndpointsMeet(path, 30);
+            const newPaths = activeLayer.paths.map(p => p.id === path.id ? closedPath : p);
+            onUpdateDoc({
+              ...doc,
+              layers: doc.layers.map(l => l.id === activeLayer.id ? { ...l, paths: newPaths } : l),
+            });
+            onStatusChange('端点を結合してパスを閉じました！');
+            setDraggedNode(null);
+            return;
+          }
+        }
+      }
     }
 
     setDraggedNode(null);
@@ -2286,6 +2686,36 @@ export const Canvas: React.FC<CanvasProps> = ({
     setSelectedNode(null);
   }, [selectedNode, doc, onUpdateDoc, onSelectPaths, onStatusChange]);
 
+  // Simplify curve nodes on active path
+  const handleSimplifySelectedPath = useCallback(() => {
+    const activeLayer = doc.layers.find(l => l.id === doc.activeLayerId);
+    if (!activeLayer) return;
+
+    let targetPathId = selectedNode?.pathId;
+    if (!targetPathId && selectedPathIds.length > 0) {
+      targetPathId = selectedPathIds[0];
+    }
+    if (!targetPathId) return;
+
+    const path = activeLayer.paths.find(p => p.id === targetPathId);
+    if (!path || path.nodes.length < 3) {
+      onStatusChange('単純化するには3点以上のアンカーポイントが必要です');
+      return;
+    }
+
+    const beforeCount = path.nodes.length;
+    const simplified = simplifyVPath(path, 2.2);
+    const afterCount = simplified.nodes.length;
+
+    const newPaths = activeLayer.paths.map(p => p.id === targetPathId ? simplified : p);
+    onUpdateDoc({
+      ...doc,
+      layers: doc.layers.map(l => l.id === activeLayer.id ? { ...l, paths: newPaths } : l),
+    });
+    setSelectedNode(null);
+    onStatusChange(`曲線単純化: アンカーポイントを ${beforeCount}個 から ${afterCount}個 に整理しました`);
+  }, [doc, selectedNode, selectedPathIds, onUpdateDoc, onStatusChange]);
+
   // Intercept Delete / Backspace key when node is selected in Reshape mode
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -2312,12 +2742,22 @@ export const Canvas: React.FC<CanvasProps> = ({
       <canvas
         ref={canvasRef}
         className="w-full h-full block"
-        onPointerDown={handlePointerDown}
+        onPointerDown={(e) => {
+          if (radialMenuPos) setRadialMenuPos(null);
+          handlePointerDown(e);
+        }}
         onPointerMove={handlePointerMove}
         onPointerUp={handlePointerUp}
         onPointerLeave={handlePointerUp}
         onDoubleClick={handleDoubleClick}
         onWheel={handleWheel}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          const rect = canvasRef.current?.getBoundingClientRect();
+          if (rect) {
+            setRadialMenuPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+          }
+        }}
       />
 
       {/* Speech Balloon Inline Text Editor Overlay */}
@@ -2455,12 +2895,27 @@ export const Canvas: React.FC<CanvasProps> = ({
             title="選択した点を削除 (Delete / Backspace)"
             className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-all ${
               selectedNode
-                ? 'bg-zinc-800 hover:bg-red-600/30 text-red-300 border border-red-500/40 hover:border-red-400 shadow-xs'
+                ? 'bg-zinc-800 hover:bg-red-600/30 text-red-300 border border-red-500/40 hover:border-red-400 shadow-xs cursor-pointer'
                 : 'opacity-40 cursor-not-allowed bg-zinc-800/40 text-zinc-500 border border-transparent'
             }`}
           >
             <Trash2 className="w-3.5 h-3.5" />
             <span>点を削除</span>
+          </button>
+
+          {/* Simplify Curve button (曲線単純化) */}
+          <button
+            onClick={handleSimplifySelectedPath}
+            disabled={!selectedNode && selectedPathIds.length === 0}
+            title="曲線の不要なアンカーポイントを整理して滑らかにする"
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-medium transition-all ${
+              selectedNode || selectedPathIds.length > 0
+                ? 'bg-zinc-800 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/40 hover:border-emerald-400 shadow-xs cursor-pointer'
+                : 'opacity-40 cursor-not-allowed bg-zinc-800/40 text-zinc-500 border border-transparent'
+            }`}
+          >
+            <Wand2 className="w-3.5 h-3.5" />
+            <span>曲線単純化</span>
           </button>
 
           <div className="pl-1 text-[11px] text-zinc-400 hidden md:block border-l border-zinc-700/60 pl-2.5">
@@ -2472,6 +2927,207 @@ export const Canvas: React.FC<CanvasProps> = ({
           </div>
         </div>
       )}
+
+      {/* Canvas Top Quick Bar: Width Brush Active HUD (線幅修正クイック切替バー) */}
+      {tool === 'width' && (
+        <div 
+          className="absolute top-4 left-1/2 -translate-x-1/2 bg-zinc-900/95 border border-violet-500/50 backdrop-blur-md rounded-xl shadow-2xl px-3 py-1.5 flex items-center gap-2 z-30 animate-in fade-in slide-in-from-top-2 duration-150 text-xs select-none"
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="flex items-center gap-1.5 border-r border-zinc-700/60 pr-2.5 font-medium text-zinc-300">
+            <SlidersHorizontal className="w-4 h-4 text-violet-400" />
+            <span className="font-bold text-violet-300">線幅修正</span>
+          </div>
+
+          {/* 4 One-tap Modes */}
+          <div className="flex items-center gap-1 bg-zinc-950/70 p-0.5 rounded-lg border border-zinc-800">
+            {[
+              { id: 'thicken', label: '太くする', symbol: '＋', desc: '線をなぞって太く' },
+              { id: 'thin', label: '細くする', symbol: '−', desc: '線をなぞって細く' },
+              { id: 'taper', label: '抜き・入り', symbol: '▲', desc: '端を尖らせる' },
+              { id: 'normalize', label: '均一化', symbol: '＝', desc: '太さを揃える' },
+            ].map(m => {
+              const isSelected = (widthBrushMode || 'thicken') === m.id;
+              return (
+                <button
+                  key={m.id}
+                  onClick={() => {
+                    onWidthBrushModeChange?.(m.id as WidthBrushMode);
+                    onStatusChange(`線幅修正モード: ${m.label} (${m.desc})`);
+                  }}
+                  title={`${m.label}: ${m.desc}`}
+                  className={`flex items-center gap-1 px-2.5 py-1.5 rounded-md font-medium transition-all cursor-pointer ${
+                    isSelected
+                      ? 'bg-violet-600 text-white shadow-xs font-bold'
+                      : 'text-zinc-400 hover:text-zinc-100 hover:bg-zinc-800'
+                  }`}
+                >
+                  <span className="text-xs font-mono">{m.symbol}</span>
+                  <span>{m.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* Return to Pen Button */}
+          <button
+            onClick={() => {
+              onSelectTool?.('pen');
+              onStatusChange('ペンツールに戻りました');
+            }}
+            title="作画に戻る (P)"
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 font-medium transition-all cursor-pointer ml-1"
+          >
+            <PenTool className="w-3.5 h-3.5 text-indigo-400" />
+            <span>ペンに戻る</span>
+          </button>
+        </div>
+      )}
+
+      {/* Canvas Top Quick Pill when using Pen: Instant One-tap Switch to Width Brush */}
+      {tool === 'pen' && (
+        <div 
+          className="absolute top-4 left-1/2 -translate-x-1/2 bg-zinc-900/85 hover:bg-zinc-900 border border-zinc-700/60 hover:border-violet-500/50 backdrop-blur-md rounded-xl shadow-xl px-2.5 py-1 flex items-center gap-2 z-20 text-xs select-none transition-all group"
+          onClick={e => e.stopPropagation()}
+        >
+          <span className="text-[11px] text-zinc-400 flex items-center gap-1 font-medium">
+            <PenTool className="w-3 h-3 text-indigo-400" />
+            作画中
+          </span>
+          <div className="w-px h-3.5 bg-zinc-700/70" />
+          <button
+            onClick={() => {
+              onSelectTool?.('width');
+              onStatusChange('線幅修正ブラシに切り替えました (線をなぞって太さ調整)');
+            }}
+            title="描いた線の太さをその場で直す・入り抜き付与 (W)"
+            className="flex items-center gap-1.5 px-2 py-0.5 rounded-lg bg-violet-600/25 hover:bg-violet-600 text-violet-200 hover:text-white border border-violet-500/40 hover:border-violet-500 transition-all font-medium cursor-pointer"
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5 text-violet-400 group-hover:text-white" />
+            <span>線幅を直す (W)</span>
+          </button>
+        </div>
+      )}
+
+      {/* Canvas Stylus / Right-click Radial Quick Menu (8-way Circular Wheel) */}
+      {radialMenuPos && (
+        <div 
+          className="absolute inset-0 z-50 select-none cursor-default"
+          onClick={() => setRadialMenuPos(null)}
+          onContextMenu={e => { e.preventDefault(); setRadialMenuPos(null); }}
+        >
+          <div 
+            className="absolute -translate-x-1/2 -translate-y-1/2 w-48 h-48 rounded-full pointer-events-auto"
+            style={{ left: radialMenuPos.x, top: radialMenuPos.y }}
+            onClick={e => e.stopPropagation()}
+          >
+            {/* Circular Backdrop & Ring */}
+            <div className="absolute inset-0 rounded-full bg-zinc-950/85 backdrop-blur-xl border border-zinc-700/80 shadow-[0_0_35px_rgba(0,0,0,0.85)] animate-in zoom-in-95 duration-100" />
+            <div className="absolute inset-2 rounded-full border border-zinc-800/60 pointer-events-none" />
+
+            {/* 8 Radial Buttons around circle at radius = 68px */}
+            {[
+              { angle: -90, id: 'pen', label: 'ペン (P)', icon: PenTool, action: () => onSelectTool?.('pen'), color: 'text-indigo-400 hover:bg-indigo-600/30 hover:border-indigo-500' },
+              { angle: -45, id: 'bucket', label: '隙間閉じバケツ (G)', icon: PaintBucket, action: () => onSelectTool?.('bucket'), color: 'text-sky-400 hover:bg-sky-600/30 hover:border-sky-500' },
+              { angle: 0, id: 'eraser', label: 'ベクター消しゴム (E)', icon: Eraser, action: () => onSelectTool?.('eraser'), color: 'text-rose-400 hover:bg-rose-600/30 hover:border-rose-500' },
+              { angle: 45, id: 'eyedropper', label: 'スポイト (I)', icon: Pipette, action: () => onSelectTool?.('eyedropper'), color: 'text-amber-400 hover:bg-amber-600/30 hover:border-amber-500' },
+              { angle: 90, id: 'reshape', label: 'パス変形 (A)', icon: Spline, action: () => onSelectTool?.('reshape'), color: 'text-cyan-400 hover:bg-cyan-600/30 hover:border-cyan-500' },
+              { angle: 135, id: 'width', label: '線幅修正 (W)', icon: SlidersHorizontal, action: () => onSelectTool?.('width'), color: 'text-violet-400 hover:bg-violet-600/30 hover:border-violet-500' },
+              { angle: 180, id: 'undo', label: '元に戻す (Ctrl+Z)', icon: Undo2, action: () => onUndo(), disabled: !canUndo, color: 'text-emerald-400 hover:bg-emerald-600/30 hover:border-emerald-500' },
+              { angle: 225, id: 'redo', label: 'やり直す (Ctrl+Y)', icon: Redo2, action: () => onRedo(), disabled: !canRedo, color: 'text-emerald-400 hover:bg-emerald-600/30 hover:border-emerald-500' },
+            ].map(item => {
+              const rad = (item.angle * Math.PI) / 180;
+              const r = 68;
+              const x = 96 + r * Math.cos(rad);
+              const y = 96 + r * Math.sin(rad);
+              const Icon = item.icon;
+              return (
+                <button
+                  key={item.id}
+                  onClick={() => {
+                    if (item.disabled) return;
+                    item.action();
+                    setRadialMenuPos(null);
+                  }}
+                  disabled={item.disabled}
+                  title={item.label}
+                  className={`absolute -translate-x-1/2 -translate-y-1/2 w-9 h-9 rounded-full flex items-center justify-center border transition-transform hover:scale-115 active:scale-95 shadow-md ${
+                    item.disabled
+                      ? 'opacity-30 cursor-not-allowed bg-zinc-900 border-zinc-800 text-zinc-600'
+                      : `bg-zinc-900/95 border-zinc-700/80 cursor-pointer ${item.color}`
+                  }`}
+                  style={{ left: `${x}px`, top: `${y}px` }}
+                >
+                  <Icon className="w-4 h-4" />
+                </button>
+              );
+            })}
+
+            {/* Center Close Pill */}
+            <button
+              onClick={() => setRadialMenuPos(null)}
+              className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 w-8 h-8 rounded-full bg-zinc-800/90 hover:bg-zinc-700 border border-zinc-600/60 flex items-center justify-center text-zinc-400 hover:text-white transition-all shadow-sm cursor-pointer"
+              title="閉じる (Esc)"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Beginner Action Hint Banner (常時表示される直感的な操作ヒントバナー) */}
+      <div 
+        className="absolute bottom-3 left-1/2 -translate-x-1/2 z-30 select-none max-w-[94vw] sm:max-w-2xl transition-all duration-200 pointer-events-auto"
+        onClick={e => e.stopPropagation()}
+      >
+        {isHintCollapsed ? (
+          <button
+            onClick={() => setIsHintCollapsed(false)}
+            title="初心者向け操作ヒントを展開"
+            className="flex items-center gap-1.5 px-3 py-1 rounded-full bg-zinc-900/90 hover:bg-zinc-800 text-zinc-300 hover:text-white border border-zinc-700/70 shadow-lg backdrop-blur-md text-xs cursor-pointer transition-all hover:scale-105"
+          >
+            <Lightbulb className="w-3.5 h-3.5 text-amber-400 animate-pulse" />
+            <span className="font-medium text-amber-300/90">💡 操作ヒント</span>
+            <ChevronUp className="w-3 h-3 text-zinc-400" />
+          </button>
+        ) : (
+          <div className="bg-zinc-950/90 border border-zinc-700/80 rounded-xl shadow-2xl backdrop-blur-md px-3.5 py-2 text-xs flex flex-col gap-1 text-zinc-200 animate-in fade-in slide-in-from-bottom-2 duration-150">
+            {/* Header row */}
+            <div className="flex items-center justify-between gap-2 border-b border-zinc-800/80 pb-1">
+              <div className="flex items-center gap-1.5 font-medium text-zinc-200">
+                <Lightbulb className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                <span className="font-bold text-amber-300/90">{TOOL_HINTS[tool]?.title || 'ツール'}</span>
+                {TOOL_HINTS[tool]?.shortcut && (
+                  <span className="bg-zinc-800 px-1.5 py-0.2 rounded text-[10px] font-mono text-zinc-400 border border-zinc-700">
+                    {TOOL_HINTS[tool].shortcut}
+                  </span>
+                )}
+              </div>
+              <button
+                onClick={() => setIsHintCollapsed(true)}
+                title="ヒントを折りたたむ"
+                className="flex items-center gap-1 text-[11px] text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/60 px-1.5 py-0.5 rounded cursor-pointer transition-colors"
+              >
+                <span>折りたたむ</span>
+                <ChevronDown className="w-3 h-3" />
+              </button>
+            </div>
+
+            {/* Instruction row */}
+            <div className="text-[11px] leading-relaxed text-zinc-100 font-medium">
+              {TOOL_HINTS[tool]?.main || 'キャンバス上をクリックまたはドラッグして操作します。'}
+            </div>
+
+            {/* Pro Tip row */}
+            {TOOL_HINTS[tool]?.tip && (
+              <div className="text-[10px] text-zinc-400 flex items-start gap-1 pt-0.5">
+                <span className="text-indigo-400 font-semibold shrink-0">ヒント:</span>
+                <span className="leading-tight">{TOOL_HINTS[tool].tip}</span>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 };

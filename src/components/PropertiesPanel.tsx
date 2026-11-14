@@ -264,7 +264,7 @@ export const PropertiesPanel: React.FC<PropertiesPanelProps> = ({
                 type="color"
                 value={firstPath && firstPath.fillColor !== 'none' ? firstPath.fillColor : '#ffffff'}
                 onChange={e => {
-                  if (firstPath) updateSelectedPaths({ fillColor: e.target.value, closed: true });
+                  if (firstPath) updateSelectedPaths({ fillColor: e.target.value });
                   onFillColorChange(e.target.value);
                 }}
                 className="opacity-0 w-full h-full cursor-pointer"

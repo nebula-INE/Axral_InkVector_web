@@ -1,6 +1,6 @@
 import { Document, Layer, VPath, VNode, Point } from '../types';
 
-export function documentToSvg(doc: Document): string {
+export function documentToSvg(doc: Document, includeDrafts: boolean = false): string {
   const parts: string[] = [];
   parts.push(`<?xml version="1.0" encoding="UTF-8"?>`);
   parts.push(
@@ -24,7 +24,7 @@ export function documentToSvg(doc: Document): string {
   // Document metadata
   parts.push(`  <!-- VektorStudio Layers -->`);
   for (const layer of doc.layers) {
-    if (!layer.visible) continue;
+    if (!layer.visible || (!includeDrafts && layer.isDraft)) continue;
     parts.push(
       `  <g id="layer-${layer.id}" ` +
       `data-name="${escapeXml(layer.name)}" ` +

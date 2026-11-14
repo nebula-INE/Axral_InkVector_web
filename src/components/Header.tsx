@@ -201,6 +201,16 @@ export const Header: React.FC<HeaderProps> = ({
           className="bg-zinc-800/60 border border-zinc-700/60 rounded px-2 py-0.5 text-zinc-200 focus:outline-none focus:border-indigo-500 w-36 text-xs"
         />
 
+        {/* New Canvas from Preset Button */}
+        <button
+          onClick={() => onOpenCanvasModal?.('new')}
+          title="用途別の用紙プリセットを選んで新規作成"
+          className="flex items-center gap-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded px-2.5 py-1 text-xs font-medium shadow-xs transition-colors cursor-pointer"
+        >
+          <FilePlus className="w-3.5 h-3.5" />
+          <span>新規キャンバス</span>
+        </button>
+
         {/* Canvas Size Trigger Button */}
         <button
           onClick={() => onOpenCanvasModal?.('resize')}

@@ -107,6 +107,8 @@ export interface Layer {
   visible: boolean;
   locked: boolean;
   clipped?: boolean; // When true, clips to the layer below
+  isDraft?: boolean; // When true, renders in manga draft light blue (#60a5fa) and excluded from exports
+  isReference?: boolean; // When true, acts as line-art reference boundary for bucket fills on other layers
   opacity: number;
   blendMode: BlendMode;
   paths: VPath[];

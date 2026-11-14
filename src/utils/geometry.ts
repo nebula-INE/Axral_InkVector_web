@@ -176,9 +176,10 @@ export function getCombinedBoundingBox(paths: VPath[]): BoundingBox {
   };
 }
 
-// True point-in-polygon containment test for closed VPath
-export function isPointInVPath(pt: Point, path: VPath): boolean {
-  if (!path.closed) return false;
+// True point-in-polygon containment test for VPath (closed shapes or open paths with virtual chord)
+export function isPointInVPath(pt: Point, path: VPath, allowOpen = false): boolean {
+  const hasFill = path.fillColor && path.fillColor !== 'none' && path.fillColor !== 'transparent';
+  if (!path.closed && !allowOpen && !hasFill) return false;
   const bbox = getPathBoundingBox(path);
   if (pt.x < bbox.minX || pt.x > bbox.maxX || pt.y < bbox.minY || pt.y > bbox.maxY) {
     return false;
@@ -363,9 +364,67 @@ export function splitVPathAtPoint(
   return [p1, p2];
 }
 
+export interface InsertNodeResult {
+  updatedPath: VPath;
+  insertedIndex: number;
+}
+
+export interface PathHitTestResult {
+  pt: Point;
+  segIdx: number;
+  t: number;
+  distance: number;
+}
+
+// Find nearest point on a path for hover cursor and preview
+export function findNearestPointOnVPath(path: VPath, targetPt: Point, maxDist = 24): PathHitTestResult | null {
+  if (path.nodes.length < 2) return null;
+  const samples = flattenVPath(path, 32);
+  let bestIdx = -1;
+  let bestDist = Infinity;
+
+  for (let i = 0; i < samples.length; i++) {
+    const d = dist(samples[i].pt, targetPt);
+    if (d < bestDist) {
+      bestDist = d;
+      bestIdx = i;
+    }
+  }
+
+  if (bestDist > maxDist || bestIdx === -1) return null;
+  const sample = samples[bestIdx];
+  return {
+    pt: sample.pt,
+    segIdx: sample.segIdx,
+    t: sample.t,
+    distance: bestDist,
+  };
+}
+
+// Snap and close open path if endpoints are within distance threshold
+export function closePathIfEndpointsMeet(path: VPath, threshold = 18): VPath {
+  if (path.closed || path.nodes.length < 3) return path;
+  const first = path.nodes[0];
+  const last = path.nodes[path.nodes.length - 1];
+  if (dist(first.pos, last.pos) <= threshold) {
+    const remainingNodes = path.nodes.slice(0, path.nodes.length - 1);
+    return {
+      ...path,
+      nodes: remainingNodes,
+      closed: true,
+    };
+  }
+  return path;
+}
+
 // Insert anchor node into path segment without altering curve shape
-export function insertNodeInSegment(path: VPath, clickPt: Point, maxDist = 20): VPath | null {
-  const samples = flattenVPath(path, 24);
+export function insertNodeInSegment(
+  path: VPath,
+  clickPt: Point,
+  maxDist = 24
+): InsertNodeResult | null {
+  if (path.nodes.length < 2) return null;
+  const samples = flattenVPath(path, 32);
   let bestIdx = -1;
   let bestDist = Infinity;
 
@@ -381,10 +440,14 @@ export function insertNodeInSegment(path: VPath, clickPt: Point, maxDist = 20): 
 
   const sample = samples[bestIdx];
   const segIdx = sample.segIdx;
-  const t = sample.t;
-  if (t < 0.05 || t > 0.95) return null; // Too close to existing node
+  const t = Math.max(0.01, Math.min(0.99, sample.t));
 
-  const nodes = [...path.nodes];
+  const nodes: VNode[] = path.nodes.map(n => ({
+    ...n,
+    cpIn: n.cpIn ? { ...n.cpIn } : undefined,
+    cpOut: n.cpOut ? { ...n.cpOut } : undefined,
+  }));
+
   const n1 = nodes[segIdx];
   const n2 = nodes[(segIdx + 1) % nodes.length];
 
@@ -407,11 +470,15 @@ export function insertNodeInSegment(path: VPath, clickPt: Point, maxDist = 20): 
   // Update n2
   n2.cpIn = c2[2];
 
-  nodes.splice(segIdx + 1, 0, newNode);
+  const insertedIndex = segIdx + 1;
+  nodes.splice(insertedIndex, 0, newNode);
 
   return {
-    ...path,
-    nodes,
+    updatedPath: {
+      ...path,
+      nodes,
+    },
+    insertedIndex,
   };
 }
 
@@ -1155,5 +1222,266 @@ export function offsetDocumentContent(doc: Document, dx: number, dy: number): Do
     layers: newLayers,
     symmetryCenter: newSymmetryCenter,
     perspective: newPerspective,
+  };
+}
+
+// ==========================================
+// 1. SMART GAP-CLOSING VECTOR BUCKET FILL
+// ==========================================
+export function findEnclosedRegionWithGaps(
+  clickPt: Point,
+  boundaryPaths: VPath[],
+  maxGap = 35
+): Point[] | null {
+  if (boundaryPaths.length === 0) return null;
+
+  // Flatten all boundary paths into line segments
+  interface LineSeg { p1: Point; p2: Point }
+  const segments: LineSeg[] = [];
+
+  for (const p of boundaryPaths) {
+    const samples = flattenVPath(p, 16);
+    for (let i = 0; i < samples.length - 1; i++) {
+      segments.push({ p1: samples[i].pt, p2: samples[i + 1].pt });
+    }
+    if (p.closed && samples.length > 2) {
+      segments.push({ p1: samples[samples.length - 1].pt, p2: samples[0].pt });
+    }
+  }
+
+  if (segments.length === 0) return null;
+
+  // Cast 72 radial rays from clickPt
+  const numRays = 72;
+  const maxSearchDist = 900;
+  const rayHits: (Point | null)[] = [];
+
+  for (let r = 0; r < numRays; r++) {
+    const angle = (r / numRays) * Math.PI * 2;
+    const dirX = Math.cos(angle);
+    const dirY = Math.sin(angle);
+    const rayEnd: Point = { x: clickPt.x + dirX * maxSearchDist, y: clickPt.y + dirY * maxSearchDist };
+
+    let closestDist = Infinity;
+    let closestPt: Point | null = null;
+
+    for (const seg of segments) {
+      const hit = lineIntersection(clickPt, rayEnd, seg.p1, seg.p2);
+      if (hit) {
+        const d = dist(clickPt, hit);
+        if (d > 1 && d < closestDist) {
+          closestDist = d;
+          closestPt = hit;
+        }
+      }
+    }
+
+    rayHits.push(closestPt);
+  }
+
+  // Check how many rays found a boundary
+  const validHits = rayHits.filter((h): h is Point => h !== null);
+  if (validHits.length < numRays * 0.5) {
+    // Too many rays escaped to infinity -> unbounded
+    return null;
+  }
+
+  // Build closed perimeter, bridging gaps up to maxGap
+  const perimeter: Point[] = [];
+  for (let i = 0; i < numRays; i++) {
+    const curr = rayHits[i];
+    if (curr) {
+      perimeter.push(curr);
+    } else {
+      // Ray i missed. Look for next hit to see if gap is bridgeable
+      let nextHit: Point | null = null;
+      let gapSpan = 0;
+      for (let step = 1; step < 12; step++) {
+        const checkIdx = (i + step) % numRays;
+        if (rayHits[checkIdx]) {
+          nextHit = rayHits[checkIdx];
+          gapSpan = step;
+          break;
+        }
+      }
+
+      const prevHit = perimeter[perimeter.length - 1];
+      if (prevHit && nextHit) {
+        const gapDist = dist(prevHit, nextHit);
+        if (gapDist <= maxGap * 1.5) {
+          // Valid gap! Interpolate bridge points
+          for (let s = 1; s <= gapSpan; s++) {
+            const t = s / (gapSpan + 1);
+            perimeter.push({
+              x: prevHit.x + (nextHit.x - prevHit.x) * t,
+              y: prevHit.y + (nextHit.y - prevHit.y) * t,
+            });
+          }
+          i += gapSpan - 1; // skip forward
+        } else {
+          return null; // Gap too large -> leak!
+        }
+      } else {
+        return null;
+      }
+    }
+  }
+
+  if (perimeter.length < 8) return null;
+  return simplifyPolyline(perimeter, 2.0);
+}
+
+// ==========================================
+// 2. PROCREATE-STYLE QUICKSHAPE RECOGNIZER
+// ==========================================
+export interface QuickShapeResult {
+  type: 'line' | 'circle' | 'ellipse' | 'rect';
+  nodes: VNode[];
+  closed: boolean;
+  label: string;
+}
+
+export function recognizeQuickShape(rawPoints: Point[]): QuickShapeResult | null {
+  if (rawPoints.length < 5) return null;
+
+  const start = rawPoints[0];
+  const end = rawPoints[rawPoints.length - 1];
+
+  let totalLength = 0;
+  for (let i = 0; i < rawPoints.length - 1; i++) {
+    totalLength += dist(rawPoints[i], rawPoints[i + 1]);
+  }
+  if (totalLength < 20) return null;
+
+  const endDistance = dist(start, end);
+  const isClosedAttempt = endDistance < 50 || endDistance / totalLength < 0.22;
+
+  // Case A: Closed shape (Circle, Ellipse, or Rect)
+  if (isClosedAttempt) {
+    let sumX = 0, sumY = 0;
+    for (const p of rawPoints) {
+      sumX += p.x;
+      sumY += p.y;
+    }
+    const cx = sumX / rawPoints.length;
+    const cy = sumY / rawPoints.length;
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of rawPoints) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const width = maxX - minX;
+    const height = maxY - minY;
+
+    // Radial distances from center
+    const radii = rawPoints.map(p => dist(p, { x: cx, y: cy }));
+    const meanR = radii.reduce((a, b) => a + b, 0) / radii.length;
+    const variance = radii.reduce((a, r) => a + Math.abs(r - meanR), 0) / radii.length;
+    const circularity = variance / Math.max(1, meanR);
+
+    // Circle or Ellipse
+    if (circularity < 0.26) {
+      const isSquareRatio = Math.abs(width - height) / Math.max(width, height) < 0.22;
+      const rx = isSquareRatio ? (width + height) / 4 : width / 2;
+      const ry = isSquareRatio ? (width + height) / 4 : height / 2;
+      const k = 0.5522847498;
+
+      const nodes: VNode[] = [
+        { pos: { x: cx, y: cy - ry }, cpOut: { x: cx + rx * k, y: cy - ry }, cpIn: { x: cx - rx * k, y: cy - ry }, smooth: true },
+        { pos: { x: cx + rx, y: cy }, cpIn: { x: cx + rx, y: cy - ry * k }, cpOut: { x: cx + rx, y: cy + ry * k }, smooth: true },
+        { pos: { x: cx, y: cy + ry }, cpIn: { x: cx + rx * k, y: cy + ry }, cpOut: { x: cx - rx * k, y: cy + ry }, smooth: true },
+        { pos: { x: cx - rx, y: cy }, cpIn: { x: cx - rx, y: cy + ry * k }, cpOut: { x: cx - rx, y: cy - ry * k }, smooth: true },
+      ];
+
+      return {
+        type: isSquareRatio ? 'circle' : 'ellipse',
+        nodes,
+        closed: true,
+        label: isSquareRatio ? '正円 (クイックシェイプ)' : '楕円 (クイックシェイプ)',
+      };
+    }
+
+    // Rectangle
+    const rectNodes: VNode[] = [
+      { pos: { x: minX, y: minY }, smooth: false },
+      { pos: { x: maxX, y: minY }, smooth: false },
+      { pos: { x: maxX, y: maxY }, smooth: false },
+      { pos: { x: minX, y: maxY }, smooth: false },
+    ];
+    return {
+      type: 'rect',
+      nodes: rectNodes,
+      closed: true,
+      label: '長方形 (クイックシェイプ)',
+    };
+  }
+
+  // Case B: Open shape (Straight Line)
+  let maxDev = 0;
+  for (const p of rawPoints) {
+    const d = perpendicularDist(p, start, end);
+    if (d > maxDev) maxDev = d;
+  }
+
+  if (maxDev / totalLength < 0.25) {
+    return {
+      type: 'line',
+      nodes: [
+        { pos: { ...start }, smooth: false },
+        { pos: { ...end }, smooth: false },
+      ],
+      closed: false,
+      label: '直線 (クイックシェイプ)',
+    };
+  }
+
+  return null;
+}
+
+// ==========================================
+// 3. STRAY DOTS / DUST CLEANER
+// ==========================================
+export function cleanStrayDots(
+  paths: VPath[],
+  maxDotSize = 8
+): { cleanedPaths: VPath[]; removedCount: number } {
+  const cleaned: VPath[] = [];
+  let removedCount = 0;
+
+  for (const p of paths) {
+    if (p.balloon || p.panel || p.mesh) {
+      cleaned.push(p);
+      continue;
+    }
+
+    const bbox = getPathBoundingBox(p);
+    const isTinyBBox = bbox.width <= maxDotSize && bbox.height <= maxDotSize;
+    const isFewNodes = p.nodes.length <= 2;
+
+    if (isTinyBBox && isFewNodes) {
+      removedCount++;
+    } else {
+      cleaned.push(p);
+    }
+  }
+
+  return { cleanedPaths: cleaned, removedCount };
+}
+
+// ==========================================
+// 4. VECTOR CURVE SIMPLIFY & SMOOTH
+// ==========================================
+export function simplifyVPath(path: VPath, tolerance = 2.0): VPath {
+  if (path.nodes.length <= 2) return path;
+  const samples = flattenVPath(path, 16);
+  const pts = samples.map(s => s.pt);
+  const simplifiedPts = simplifyPolyline(pts, tolerance);
+  const newNodes = catmullRomToBezier(simplifiedPts, path.closed);
+  return {
+    ...path,
+    nodes: newNodes,
   };
 }

@@ -438,6 +438,10 @@ export const App: React.FC = () => {
             setClipboardImageDataUrl(null);
             setIsTraceModalOpen(true);
           }}
+          canUndo={canUndo}
+          canRedo={canRedo}
+          onUndo={undo}
+          onRedo={redo}
         />
 
         {/* Center Drawing Canvas */}
@@ -459,6 +463,8 @@ export const App: React.FC = () => {
             onSelectPaths={setSelectedPathIds}
             onUndo={undo}
             onRedo={redo}
+            canUndo={canUndo}
+            canRedo={canRedo}
             onStatusChange={setStatusMessage}
             onStrokeColorChange={handleStrokeColorChange}
             flipH={flipH}
@@ -468,6 +474,8 @@ export const App: React.FC = () => {
             eraserMode={eraserMode}
             eraserRadius={eraserRadius}
             widthBrushMode={widthBrushMode}
+            onWidthBrushModeChange={setWidthBrushMode}
+            onSelectTool={setTool}
             activeTone={activeTone}
           />
         </main>

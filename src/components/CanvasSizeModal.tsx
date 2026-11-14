@@ -186,18 +186,22 @@ export const CanvasSizeModal: React.FC<CanvasSizeModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
-      <div className="bg-zinc-900 border border-zinc-700 w-full max-w-2xl rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
+      <div className="bg-zinc-900 border border-zinc-700 w-full max-w-2xl sm:max-w-3xl rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-150">
         {/* Header */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-800 bg-zinc-900/50">
           <div className="flex items-center gap-2">
-            <Maximize2 className="w-5 h-5 text-indigo-400" />
+            {modalMode === 'resize' ? (
+              <Maximize2 className="w-5 h-5 text-indigo-400" />
+            ) : (
+              <FilePlus className="w-5 h-5 text-indigo-400" />
+            )}
             <h2 className="text-base font-semibold text-zinc-100">
-              {modalMode === 'resize' ? 'キャンバスサイズ変更' : '新規キャンバス作成'}
+              {modalMode === 'resize' ? 'キャンバスサイズ変更' : '新規キャンバス作成 (用紙を選ぶ)'}
             </h2>
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg transition-colors"
+            className="p-1.5 text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800 rounded-lg transition-colors cursor-pointer"
           >
             <X className="w-5 h-5" />
           </button>
@@ -208,7 +212,7 @@ export const CanvasSizeModal: React.FC<CanvasSizeModalProps> = ({
           <div className="flex p-1 bg-zinc-800 rounded-xl">
             <button
               onClick={() => setModalMode('resize')}
-              className={`flex-1 py-1.5 flex items-center justify-center gap-1.5 rounded-lg text-xs font-medium transition-colors ${
+              className={`flex-1 py-1.5 flex items-center justify-center gap-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
                 modalMode === 'resize'
                   ? 'bg-indigo-600 text-white shadow-sm'
                   : 'text-zinc-400 hover:text-zinc-200'
@@ -219,7 +223,7 @@ export const CanvasSizeModal: React.FC<CanvasSizeModalProps> = ({
             </button>
             <button
               onClick={() => setModalMode('new')}
-              className={`flex-1 py-1.5 flex items-center justify-center gap-1.5 rounded-lg text-xs font-medium transition-colors ${
+              className={`flex-1 py-1.5 flex items-center justify-center gap-1.5 rounded-lg text-xs font-medium transition-colors cursor-pointer ${
                 modalMode === 'new'
                   ? 'bg-indigo-600 text-white shadow-sm'
                   : 'text-zinc-400 hover:text-zinc-200'
@@ -230,6 +234,52 @@ export const CanvasSizeModal: React.FC<CanvasSizeModalProps> = ({
             </button>
           </div>
         </div>
+
+        {/* Beginner Starter Quick Presets (用途別カード選択) */}
+        {modalMode === 'new' && (
+          <div className="px-6 pt-3 pb-1">
+            <div className="text-[11px] font-semibold text-zinc-300 mb-2 flex items-center justify-between">
+              <span>🌟 初心者おすすめ・用途から選ぶ</span>
+              <span className="text-[10px] text-zinc-500 font-normal">クリックして用紙サイズを即座にセット</span>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+              {[
+                { id: 'square', icon: '🎨', title: 'SNSアイコン', desc: 'X・Instagram (1080×1080)', w: 1080, h: 1080, cat: 'illust', webtoon: false },
+                { id: 'fhd', icon: '🖥️', title: 'YouTube・壁紙', desc: 'PCフルHD横長 (1920×1080)', w: 1920, h: 1080, cat: 'illust', webtoon: false },
+                { id: 'b5_compact', icon: '📖', title: 'マンガ下描き・同人', desc: '軽快なB5黄金比 (1820×2570)', w: 1820, h: 2570, cat: 'manga', webtoon: false },
+                { id: 'b5_print', icon: '🖨️', title: '商業誌原稿・B5判', desc: '高精細印刷 (2570×3640)', w: 2570, h: 3640, cat: 'manga', webtoon: false },
+                { id: 'mobile_story', icon: '📱', title: 'スマホ縦画面', desc: 'TikTok・壁紙 (1080×1920)', w: 1080, h: 1920, cat: 'illust', webtoon: false },
+                { id: 'webtoon_std', icon: '📜', title: 'Webtoon連載', desc: '縦スクロール (800×4800)', w: 800, h: 4800, cat: 'webtoon', webtoon: true },
+              ].map(card => {
+                const isSelected = width === card.w && height === card.h && isWebtoon === card.webtoon;
+                return (
+                  <button
+                    key={card.id}
+                    onClick={() => {
+                      setWidth(card.w);
+                      setHeight(card.h);
+                      setAspectRatio(card.w / card.h);
+                      setSelectedPresetId(card.id);
+                      setActiveCategory(card.cat as any);
+                      setIsWebtoon(card.webtoon);
+                    }}
+                    className={`p-2.5 rounded-xl border text-left flex flex-col gap-1 transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-indigo-600/20 border-indigo-500 shadow-sm text-white scale-[1.02]'
+                        : 'bg-zinc-800/40 hover:bg-zinc-800/90 border-zinc-700/60 text-zinc-300 hover:text-white'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-sm">{card.icon}</span>
+                      <span className="font-bold text-xs">{card.title}</span>
+                    </div>
+                    <span className="text-[10px] text-zinc-400 leading-tight">{card.desc}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
 
         {/* Body: Left Presets + Right Numeric Form & Preview */}
         <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6 text-xs text-zinc-300">
